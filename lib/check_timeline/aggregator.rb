@@ -31,12 +31,12 @@ module CheckTimeline
       log("Fetching timeline for check: #{check_id}", quiet)
       log("Sources configured: #{sources.size}", quiet)
 
-      all_events = @parallel ? fetch_parallel(quiet) : fetch_sequential(quiet)
+      all_events, check_total_cents = @parallel ? fetch_parallel(quiet) : fetch_sequential(quiet)
 
       log("", quiet)
       log("Total events collected: #{all_events.size}", quiet)
 
-      Timeline.new(check_id: check_id, events: all_events)
+      Timeline.new(check_id: check_id, events: all_events, check_total_cents: check_total_cents)
     end
 
     private
@@ -46,9 +46,13 @@ module CheckTimeline
     # ------------------------------------------------------------------
 
     def fetch_sequential(quiet)
-      sources.flat_map do |source|
-        fetch_source(source, quiet)
+      check_total_cents = nil
+      all_events = sources.flat_map do |source|
+        events = fetch_source(source, quiet)
+        check_total_cents ||= source.check_total_cents if source.respond_to?(:check_total_cents)
+        events
       end
+      [all_events, check_total_cents]
     end
 
     def fetch_parallel(quiet)
@@ -63,7 +67,13 @@ module CheckTimeline
       end
 
       threads.each(&:join)
-      results.flatten.compact
+
+      all_events = results.flatten.compact
+      check_total_cents = sources.lazy
+                                 .select { |s| s.respond_to?(:check_total_cents) }
+                                 .filter_map(&:check_total_cents)
+                                 .first
+      [all_events, check_total_cents]
     end
 
     def fetch_source(source, quiet, mutex: nil)

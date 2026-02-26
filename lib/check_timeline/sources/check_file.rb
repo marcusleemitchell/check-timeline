@@ -58,6 +58,7 @@ module CheckTimeline
         super
         @check_file_path    = options[:check_file]
         @payments_file_path = options[:payments_file]
+        @check_total_cents  = nil
       end
 
       def available?
@@ -75,6 +76,10 @@ module CheckTimeline
         check_events   = load_check_events
         payment_events = @payments_file_path ? load_payment_events : []
         check_events + payment_events
+      end
+
+      def check_total_cents
+        @check_total_cents
       end
 
       private
@@ -96,6 +101,10 @@ module CheckTimeline
         # If check_id was not passed explicitly on the CLI, derive it from
         # the file itself so event IDs are still deterministic.
         derive_check_id_from_doc!(doc) if @check_id.nil? || @check_id.to_s.strip.empty?
+
+        # Capture the authoritative total_cents from the check record so the
+        # Timeline can display it directly rather than summing event amounts.
+        @check_total_cents = parse_check_total_cents(doc)
 
         check_events   = parse_check_document(doc)
         version_events = parse_versions_from_doc(doc)

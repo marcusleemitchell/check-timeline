@@ -45,6 +45,13 @@ module CheckTimeline
         build_check_events(data, attributes, venue, location)
       end
 
+      # Extract the authoritative total_cents from a check JSON:API document.
+      # Returns an Integer when present, or nil if the field is absent.
+      def parse_check_total_cents(doc)
+        raw = doc.dig("data", "attributes", "total_cents")
+        raw.nil? ? nil : raw.to_i
+      end
+
       # Parse a JSON:API payments document and return an array of Events.
       #
       #   doc  - the parsed Hash/Array from GET /public/checks/:id/payments

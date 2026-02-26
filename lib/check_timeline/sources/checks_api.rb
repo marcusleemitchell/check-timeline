@@ -43,6 +43,10 @@ module CheckTimeline
         fetch_check_events + fetch_payment_events
       end
 
+      def check_total_cents
+        @check_total_cents
+      end
+
       private
 
       # -----------------------------------------------------------------------
@@ -55,6 +59,11 @@ module CheckTimeline
         handle_response!(response, endpoint: endpoint)
 
         doc = parse_json!(response.body, endpoint: endpoint)
+
+        # Capture the authoritative total_cents from the check record so the
+        # Timeline can display it directly rather than summing event amounts.
+        @check_total_cents = parse_check_total_cents(doc)
+
         parse_check_document(doc)
       end
 
