@@ -1,0 +1,309 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "thor"
+require "check_timeline"
+
+module CheckTimeline
+  class CLI < Thor
+    def self.exit_on_failure?
+      true
+    end
+
+    desc "generate [UUID]", "Generate a timeline for a check"
+    long_desc <<~LONGDESC
+      Generate a visual HTML timeline for a check identified by UUID.
+
+      Data is pulled from one or more sources and merged chronologically:
+
+        - The Checks API (GET /public/checks/:id and /public/checks/:id/payments)
+          requires CHECKS_API_BASE_URL, CHECKS_API_KEY, and CHECKS_APP_NAME to be set.
+
+        - A local check JSON file (--check-file) in the same JSON:API format
+          returned by the live API. Useful offline or for saved snapshots.
+          Optionally pair it with --payments-file for payment events.
+
+        - One or more local Raygun exception JSON files (--raygun).
+          Each file must contain a single Raygun error payload.
+
+      At least one source must be available. If the API env vars are not set
+      and no --check-file is given, the tool will exit with an error.
+
+      EXAMPLES:
+
+        # API only
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77
+
+        # API + Raygun files
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \\
+          --raygun exceptions/error1.json \\
+          --raygun exceptions/error2.json
+
+        # API + Raygun glob
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \\
+          --raygun "exceptions/*.json"
+
+        # Local check file only (no API credentials needed)
+        bin/check-timeline generate --check-file check.json
+
+        # Local check file only — PaperTrail versions are parsed automatically
+        # if present in the file's "included" array
+        bin/check-timeline generate --check-file check.json
+
+        # Local check file + payments file + Raygun exceptions
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \\
+          --check-file check.json \\
+          --payments-file payments.json \\
+          --raygun "exceptions/*.json"
+
+        # Write to a specific path, don't open the browser
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \\
+          --output /tmp/timeline.html --no-open
+
+        # Parallel fetch, quiet output
+        bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \\
+          --parallel --quiet
+    LONGDESC
+
+    option :check_file,
+           type:    :string,
+           aliases: "-c",
+           banner:  "PATH",
+           desc:    "Path to a local check JSON file (same format as the API response). " \
+                    "Replaces or supplements the live API call."
+
+    option :payments_file,
+           type:    :string,
+           aliases: "-p",
+           banner:  "PATH",
+           desc:    "Path to a local payments JSON file. Only used when --check-file is given. " \
+                    "Ignored if the live API is available and --check-file is not set."
+
+    option :raygun,
+           type:    :array,
+           aliases: "-r",
+           banner:  "PATH [PATH...]",
+           desc:    "One or more paths or glob patterns to local Raygun exception JSON files. " \
+                    "Can be specified multiple times: --raygun a.json --raygun b.json"
+
+    option :output,
+           type:    :string,
+           aliases: "-o",
+           banner:  "PATH",
+           desc:    "Output path for the rendered HTML file. " \
+                    "Defaults to ./timeline_<check_id>.html in the current directory."
+
+    option :open,
+           type:    :boolean,
+           default: true,
+           desc:    "Automatically open the rendered HTML file in the default browser. " \
+                    "Use --no-open to suppress this behaviour."
+
+    option :parallel,
+           type:    :boolean,
+           default: false,
+           aliases: "-P",
+           desc:    "Fetch all sources concurrently using threads. " \
+                    "Most useful when multiple API sources are configured."
+
+    option :quiet,
+           type:    :boolean,
+           default: false,
+           aliases: "-q",
+           desc:    "Suppress all progress output. Errors and warnings still go to stderr."
+
+    def generate(uuid = nil)
+      check_id = resolve_check_id(uuid)
+      sources  = build_sources(check_id)
+
+      if sources.empty?
+        error "No sources are configured. Provide API credentials via environment variables " \
+              "or supply a local file with --check-file."
+        exit 1
+      end
+
+      log "check-timeline v#{CheckTimeline::VERSION}", :bold
+      log ""
+
+      aggregator = Aggregator.new(
+        check_id: check_id,
+        sources:  sources,
+        parallel: options[:parallel]
+      )
+
+      timeline = aggregator.run(quiet: options[:quiet])
+
+      # When --check-file is used without a UUID argument, CheckFileSource derives
+      # the id from data.id in the file and writes it back onto @check_id.
+      # Re-read it here so the output filename and summary line use the real UUID.
+      if check_id.to_s.strip.empty?
+        check_id = sources.first.check_id
+        timeline = CheckTimeline::Timeline.new(
+          check_id: check_id,
+          events:   timeline.events
+        )
+      end
+
+      if timeline.empty?
+        warn_out "No events were found for check #{check_id}. " \
+                 "Check your credentials, UUID, and file paths."
+        exit 1
+      end
+
+      log ""
+      log "Rendering HTML timeline..."
+
+      renderer = Renderers::HtmlRenderer.new(timeline)
+      path     = renderer.render(
+        output_path:  options[:output],
+        open_browser: options[:open]
+      )
+
+      log ""
+      log "Done. #{timeline.count} events across #{timeline.duration}."
+      log "Output: #{path}"
+    end
+
+    # -------------------------------------------------------------------------
+
+    desc "version", "Print the check-timeline version"
+    def version
+      puts "check-timeline #{CheckTimeline::VERSION}"
+    end
+
+    map %w[--version -v] => :version
+
+    private
+
+    # -------------------------------------------------------------------------
+    # Check ID resolution
+    # -------------------------------------------------------------------------
+
+    # The UUID positional argument is optional when --check-file is given,
+    # because the id can be read from the file itself. In all other cases
+    # a UUID is required.
+    def resolve_check_id(uuid)
+      return uuid unless uuid.nil? || uuid.strip.empty?
+
+      if options[:check_file]
+        # We'll let CheckFileSource derive the id from the file.
+        # Use a sentinel empty string — CheckFileSource handles this case.
+        return ""
+      end
+
+      error "A check UUID is required when not using --check-file.\n\n" \
+            "Usage: bin/check-timeline generate <UUID> [options]\n" \
+            "       bin/check-timeline generate --check-file check.json [options]"
+      exit 1
+    end
+
+    # -------------------------------------------------------------------------
+    # Source construction
+    # -------------------------------------------------------------------------
+
+    def build_sources(check_id)
+      sources = []
+
+      # ── Local check file (--check-file) ─────────────────────────────────
+      if options[:check_file]
+        source = Sources::CheckFileSource.new(
+          check_id:      check_id,
+          check_file:    options[:check_file],
+          payments_file: options[:payments_file]
+        )
+
+        if source.available?
+          log_source "check_file",
+                     options[:check_file],
+                     options[:payments_file] && "payments: #{options[:payments_file]}"
+          sources << source
+        end
+
+      # ── Live Checks API ──────────────────────────────────────────────────
+      # Only used when --check-file is NOT given. This avoids double-counting
+      # check events when a file is provided alongside API credentials.
+      elsif api_credentials_present?
+        source = Sources::ChecksApiSource.new(check_id: check_id)
+        log_source "checks_api", ENV["CHECKS_API_BASE_URL"]
+        sources << source
+      else
+        warn_out "Checks API credentials not set (CHECKS_API_BASE_URL, CHECKS_API_KEY, " \
+                 "CHECKS_APP_NAME). Skipping live API source."
+      end
+
+      # ── Raygun exception files (--raygun, repeatable) ────────────────────
+      raygun_paths = resolve_raygun_paths
+      if raygun_paths.any?
+        source = Sources::RaygunFileSource.new(
+          check_id: check_id,
+          files:    raygun_paths
+        )
+
+        if source.available?
+          log_source "raygun", "#{raygun_paths.size} file(s)"
+          sources << source
+        else
+          warn_out "No readable Raygun files found matching the supplied paths/globs."
+        end
+      end
+
+      sources
+    end
+
+    # -------------------------------------------------------------------------
+    # Raygun path / glob resolution
+    # -------------------------------------------------------------------------
+
+    # Thor's :array type collects repeated --raygun flags into a single array.
+    # Each entry may be a literal path or a glob pattern. We expand globs here
+    # so the count logged above reflects actual files, not patterns.
+    def resolve_raygun_paths
+      return [] if options[:raygun].nil? || options[:raygun].empty?
+
+      options[:raygun].flat_map do |entry|
+        if entry.include?("*") || entry.include?("?")
+          Dir.glob(entry).select { |f| File.file?(f) }
+        else
+          [entry]
+        end
+      end.uniq
+    end
+
+    # -------------------------------------------------------------------------
+    # API credential check
+    # -------------------------------------------------------------------------
+
+    def api_credentials_present?
+      %w[CHECKS_API_BASE_URL CHECKS_API_KEY CHECKS_APP_NAME].all? do |var|
+        !ENV[var].to_s.strip.empty?
+      end
+    end
+
+    # -------------------------------------------------------------------------
+    # Output helpers
+    # -------------------------------------------------------------------------
+
+    def log(message, style = nil)
+      return if options[:quiet]
+
+      style == :bold ? $stdout.puts("\e[1m#{message}\e[0m") : $stdout.puts(message)
+    end
+
+    def warn_out(message)
+      $stderr.puts "[WARN] #{message}"
+    end
+
+    def error(message)
+      $stderr.puts "\e[31m[ERROR] #{message}\e[0m"
+    end
+
+    def log_source(name, *details)
+      detail_str = details.compact.join(" | ")
+      log "  + Source: #{name}#{detail_str.empty? ? "" : " (#{detail_str})"}"
+    end
+  end
+end
+
+CheckTimeline::CLI.start(ARGV)

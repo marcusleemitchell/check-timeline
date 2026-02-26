@@ -1,0 +1,38 @@
+# Bundler
+/.bundle/
+/vendor/bundle/
+
+# Gems
+Gemfile.lock
+
+# Environment / credentials
+.env
+.env.*
+!.env.example
+
+# JSON data files — check responses, version dumps, Raygun exceptions, etc.
+*.json
+
+# Generated timeline HTML output
+timeline*
+
+# Ruby / OS noise
+*.gem
+*.rbc
+.byebug_history
+.pry_history
+/tmp/
+/log/
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
