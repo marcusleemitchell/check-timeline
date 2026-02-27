@@ -24,5 +24,6 @@ gem "dry-struct", "~> 1.6"
 gem "dry-types", "~> 1.7"
 
 group :development, :test do
-  gem "pry", "~> 0.14"
+  gem "pry",      "~> 0.14"
+  gem "minitest", "~> 5.25"
 end

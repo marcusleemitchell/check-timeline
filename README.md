@@ -37,6 +37,7 @@ A Ruby CLI tool that aggregates data from multiple sources — REST APIs and loc
 - [Event Types Reference](#event-types-reference)
 - [Severity Levels](#severity-levels)
 - [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 - [Development](#development)
 
 ---
@@ -986,6 +987,85 @@ Use `--no-open` to suppress the attempt, and open the file manually. The auto-op
 
 **Events are out of order / duplicate**
 Event IDs are deterministic SHA1 hashes of their content. If you run the tool twice against the same data, IDs will be identical. A future deduplication pass in the `Aggregator` can use these IDs to deduplicate across runs.
+
+---
+
+## Testing
+
+The project uses [Minitest](https://github.com/minitest/minitest) (stdlib-compatible, no extra dependencies beyond the gem itself). The suite covers every layer of the application — currency formatting, event construction, timeline logic, all three data sources, the aggregator, and the HTML renderer.
+
+### Running the tests
+
+```sh
+# Run the full suite via Rake (recommended)
+rake test
+
+# Or invoke Ruby directly
+ruby -Itest test/unit/currency_test.rb
+ruby -Itest test/unit/event_test.rb
+ruby -Itest test/unit/timeline_test.rb
+ruby -Itest test/unit/aggregator_test.rb
+ruby -Itest test/unit/sources/checks_parser_test.rb
+ruby -Itest test/unit/sources/check_file_test.rb
+ruby -Itest test/unit/sources/raygun_file_test.rb
+ruby -Itest test/unit/renderers/html_renderer_test.rb
+```
+
+`rake test` (or just `rake`, since it is the default task) discovers and runs all files matching `test/unit/**/*_test.rb`.
+
+### Test structure
+
+```
+test/
+├── test_helper.rb              # Boot file — loads the app and shared factory helpers
+├── fixtures/                   # Minimal, committed JSON files used as test data
+│   ├── check.json              # JSON:API check document with ms-precision timestamps
+│   ├── payments.json           # Payments document with captured_at milliseconds
+│   ├── raygun_flat.json        # Flat Raygun4Ruby gem format (real production shape)
+│   └── raygun_nested.json      # Nested Details-envelope format with inner exception
+└── unit/
+    ├── currency_test.rb
+    ├── event_test.rb
+    ├── timeline_test.rb
+    ├── aggregator_test.rb
+    ├── sources/
+    │   ├── checks_parser_test.rb
+    │   ├── check_file_test.rb
+    │   └── raygun_file_test.rb
+    └── renderers/
+        └── html_renderer_test.rb
+```
+
+### Coverage summary
+
+| File | Tests | What is covered |
+|---|---|---|
+| `currency_test.rb` | 22 | All formatting cases — GBP/USD/EUR/JPY/unknown codes, negative values, nil, class method, symbol lookup, case-insensitivity |
+| `event_test.rb` | 41 | Construction and coercions, `dry-struct` defaults, `formatted_amount`, source icons, `error?`, chronological sorting with millisecond precision |
+| `timeline_test.rb` | 53 | Event sorting (including sub-second), `duration` formatting across all granularities, `by_date`/`by_source`/`by_category`, filtering, value ledger, `final_value_cents` with and without `check_total_cents`, `severity_counts`, `with_check_total_cents` immutability |
+| `aggregator_test.rb` | 19 | Sequential and parallel fetch, event merging and sort order, `check_total_cents` threading from source → timeline, unavailable source skipping, quiet mode |
+| `checks_parser_test.rb` | 47 | All event types (created/updated/paid/line items/discounts/service charges/payments), metadata `_at` field inclusion with raw ISO 8601 strings, millisecond timestamp preservation, currency defaulting, empty-field handling |
+| `check_file_test.rb` | 33 | `available?`, check event fetch, `check_total_cents` lifecycle, check ID derivation from file, payment events, missing payments file, error handling for bad JSON, aggregator integration end-to-end |
+| `raygun_file_test.rb` | 49 | Both payload shapes (flat Raygun4Ruby gem and nested Details envelope), title/message/severity/timestamp extraction, all metadata fields, inner exception, HTTP status severity mapping, multi-file fetch, invalid JSON skipping, glob resolution, stack trace truncation |
+| `html_renderer_test.rb` | 62 | HTML structure, `data-*` attributes rendered as plain strings (no symbol colon prefix), event card content, millisecond timestamps in event time display, raw `_at` strings in metadata table with `.metadata-value-timestamp` class, filter JS initialisation from DOM, sidebar filter onclick handlers, duration formatting in header, empty-state, file writing |
+
+### Fixtures
+
+Fixtures live under `test/fixtures/` and are committed to source control. They are intentionally minimal — just enough fields for the parser tests to exercise all code paths — and are not copies of real production data.
+
+The `*.json` glob in `.gitignore` applies only to the project root, so fixture files are tracked normally.
+
+### Shared helpers
+
+`test/test_helper.rb` defines `CheckTimeline::TestHelpers`, which is mixed into every `Minitest::Test` subclass automatically:
+
+| Helper | Returns | Description |
+|---|---|---|
+| `build_event(overrides = {})` | `Event` | Builds a valid `Event` with sensible defaults; any attribute can be overridden |
+| `build_event_at(iso8601, overrides = {})` | `Event` | Like `build_event` but sets `timestamp` from an ISO 8601 string |
+| `build_timeline(events:, check_id:, check_total_cents:)` | `Timeline` | Builds a `Timeline`; all keyword arguments are optional |
+| `fixture_path(name)` | `String` | Absolute path to a file in `test/fixtures/` |
+| `load_fixture_json(name)` | `Hash/Array` | Reads and JSON-parses a fixture file |
 
 ---
 
