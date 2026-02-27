@@ -654,6 +654,12 @@ module CheckTimeline
         venue_attrs    = venue&.dig("attributes")    || {}
         location_attrs = location&.dig("attributes") || {}
 
+        # Collect all _at timestamp fields present on the attributes hash so
+        # the full ISO 8601 string (including milliseconds) is visible in the
+        # expanded card exactly as it arrived from the API / file.
+        at_fields = attrs.select { |k, v| k.end_with?("_at") && !v.nil? }
+                         .transform_keys { |k| k }
+
         {
           "check_id"              => data["id"],
           "check_number"          => attrs["check_number"],
@@ -674,7 +680,7 @@ module CheckTimeline
           "net_cents"             => attrs["net_cents"],
           "line_items_tax_cents"  => attrs["line_items_tax_cents"],
           "gratuities_cents"      => attrs["gratuities_cents"]
-        }.compact
+        }.merge(at_fields).compact
       end
     end
   end

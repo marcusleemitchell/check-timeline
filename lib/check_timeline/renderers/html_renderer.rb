@@ -122,7 +122,9 @@ module CheckTimeline
         def format_timestamp(dt)
           return "—" if dt.nil?
 
-          dt.strftime("%d %b %Y %H:%M:%S UTC")
+          ms = (dt.sec_fraction * 1000).to_i
+          fmt = ms > 0 ? dt.strftime("%d %b %Y %H:%M:%S.") + format("%03d", ms) : dt.strftime("%d %b %Y %H:%M:%S")
+          "#{fmt} UTC"
         end
 
         def format_timestamp_iso(dt)
@@ -135,6 +137,15 @@ module CheckTimeline
           return "—" if dt.nil?
 
           dt.strftime("%H:%M:%S")
+        end
+
+        # Like format_time_only but appends .ms when the timestamp has non-zero
+        # sub-second precision — e.g. "20:36:54.769" vs "20:36:54".
+        def format_time_precise(dt)
+          return "—" if dt.nil?
+
+          ms = (dt.sec_fraction * 1000).to_i
+          ms > 0 ? dt.strftime("%H:%M:%S.") + format("%03d", ms) : dt.strftime("%H:%M:%S")
         end
 
         def format_date(dt)
