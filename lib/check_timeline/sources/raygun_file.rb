@@ -116,14 +116,14 @@ module CheckTimeline
 
       def build_exception_event(payload, file_path)
         occurred_on = extract_occurred_on(payload)
-        details     = extract_details(payload)
+        details     = normalise_details(payload)
         error       = extract_error(details)
         request     = extract_request(details)
         response    = extract_response(details)
 
-        class_name  = error.fetch("ClassName", "UnknownError")
-        message     = error.fetch("Message", "No message provided")
-        status_code = response&.fetch("StatusCode", nil)
+        class_name  = error.fetch("ClassName", nil) || error.fetch("className", "UnknownError")
+        message     = error.fetch("Message", nil)   || error.fetch("message", "No message provided")
+        status_code = response&.fetch("StatusCode", nil) || response&.fetch("statusCode", nil)
 
         build_event(
           id:          event_id("raygun", file_path, occurred_on.to_s),
@@ -151,8 +151,33 @@ module CheckTimeline
         DateTime.now
       end
 
-      def extract_details(payload)
-        payload["Details"] || payload["details"] || {}
+      # Normalise both payload shapes into a single canonical details hash:
+      #
+      #   Nested envelope shape (Details wrapper):
+      #     { "OccurredOn" => "...", "Details" => { "Error" => {...}, "Request" => {...}, ... } }
+      #
+      #   Flat shape (actual Raygun4Ruby gem output):
+      #     { "OccurredOn" => "...", "error" => {...}, "request" => {...}, "machineName" => "...", ... }
+      #
+      # The returned hash always uses the nested-envelope key names so all
+      # downstream helpers work without modification.
+      def normalise_details(payload)
+        # Prefer an explicit Details/details wrapper when present
+        if (details = payload["Details"] || payload["details"])
+          return details
+        end
+
+        # Flat format — lift the relevant keys into a Details-shaped hash
+        {
+          "Error"          => payload["error"]          || payload["Error"],
+          "Request"        => payload["request"]        || payload["Request"],
+          "Response"       => payload["response"]       || payload["Response"],
+          "User"           => payload["user"]           || payload["User"],
+          "Tags"           => payload["tags"]           || payload["Tags"]           || [],
+          "UserCustomData" => payload["userCustomData"] || payload["UserCustomData"] || {},
+          "MachineName"    => payload["machineName"]    || payload["MachineName"],
+          "Version"        => payload["version"]        || payload["Version"]
+        }.compact
       end
 
       def extract_error(details)
@@ -178,11 +203,11 @@ module CheckTimeline
         message = error["Message"] || error["message"]
         parts << message if message
 
-        # Request line
+        # Request line — only include when at least one of method/url is known
         if request
-          method = request["HttpMethod"] || request["method"] || "?"
-          url    = request["Url"]        || request["url"]    || "?"
-          parts << "Request: #{method} #{url}"
+          method = request["HttpMethod"] || request["method"]
+          url    = request["Url"]        || request["url"]
+          parts << "Request: #{method || "?"} #{url || "?"}" if method || url
         end
 
         # Response status
