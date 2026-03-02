@@ -108,7 +108,8 @@ module CheckTimeline
 
         check_events   = parse_check_document(doc)
         version_events = parse_versions_from_doc(doc)
-        check_events + version_events
+        payment_events = parse_payments_from_doc(doc)
+        check_events + version_events + payment_events
       end
 
       # ------------------------------------------------------------------
@@ -165,6 +166,18 @@ module CheckTimeline
 
         currency = doc.dig("data", "attributes", "currency") || "GBP"
         parse_versions_document(doc, currency: currency)
+      end
+
+      # Parse payment records sideloaded in the check document's "included"
+      # array. The live API embeds payments directly in the check response, so
+      # no separate payments file is needed when working from a saved snapshot.
+      # Returns an empty array silently when no payment records are present.
+      def parse_payments_from_doc(doc)
+        included = doc["included"] || []
+        payments = included.select { |r| r["type"] == "payments" }
+        return [] if payments.empty?
+
+        parse_payments_document(payments)
       end
     end
 
