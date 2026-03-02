@@ -138,11 +138,16 @@ module CheckTimeline
       # When --check-file is used without a UUID argument, CheckFileSource derives
       # the id from data.id in the file and writes it back onto @check_id.
       # Re-read it here so the output filename and summary line use the real UUID.
+      # check_total_cents must also be forwarded so formatted_final_value stays correct
+      # rather than falling back to summing all event amounts.
       if check_id.to_s.strip.empty?
-        check_id = sources.first.check_id
+        check_id          = sources.first.check_id
+        check_file_source = sources.first
+        check_total_cents = check_file_source.respond_to?(:check_total_cents) ? check_file_source.check_total_cents : nil
         timeline = CheckTimeline::Timeline.new(
-          check_id: check_id,
-          events:   timeline.events
+          check_id:          check_id,
+          events:            timeline.events,
+          check_total_cents: check_total_cents
         )
       end
 
