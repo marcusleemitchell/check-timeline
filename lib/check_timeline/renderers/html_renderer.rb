@@ -322,7 +322,7 @@ module CheckTimeline
         ].freeze
 
         def chart_data_json
-          return {points: [], exceptions: [], currency: "£",
+          return {points: [], exceptions: [], versions: [], currency: "£",
                   min_value: 0, max_value: 0}.to_json if timeline.empty?
 
           t_start = timeline.started_at
@@ -439,6 +439,20 @@ module CheckTimeline
               }
             end
 
+          # ── Version markers ──────────────────────────────────────────────
+          versions = timeline.events
+            .select  { |e| e.category == :version }
+            .map do |e|
+              x = ((e.timestamp - t_start).to_f / span).clamp(0.0, 1.0)
+              {
+                event_id:        e.id,
+                x:               x.round(6),
+                label:           e.title,
+                severity:        e.severity.to_s,
+                timestamp_label: format_timestamp(e.timestamp)
+              }
+            end
+
           # ── Y-axis range ─────────────────────────────────────────────────
           # Include authoritative_total in the max calculation so the Y-axis
           # peak reflects total_cents (net + tax + gratuity), not just the
@@ -454,11 +468,12 @@ module CheckTimeline
                         .first || "£"
 
           {
-            points:    points,
+            points:     points,
             exceptions: exceptions,
-            currency:  sym,
-            min_value: min_value,
-            max_value: max_value
+            versions:   versions,
+            currency:   sym,
+            min_value:  min_value,
+            max_value:  max_value
           }.to_json
         end
 
