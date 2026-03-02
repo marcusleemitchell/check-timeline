@@ -284,6 +284,184 @@ module CheckTimeline
           data.to_json
         end
 
+        # ── Chart data JSON ──────────────────────────────────────────────────
+        # Produces a single JSON object consumed by the value chart:
+        #
+        #   points      - chronological delta events (line items, discounts,
+        #                 payments), each with a normalised x position (0–1
+        #                 across total time span), running total, formatted
+        #                 label, category, source, and the DOM event-card id
+        #                 so the scrubber can scroll to the matching card.
+        #
+        #                 Check-level summary events (check.created,
+        #                 check.updated, check.paid) carry total_cents rather
+        #                 than a delta and are intentionally excluded so the
+        #                 running total isn't triple-counted.
+        #
+        #   exceptions  - all events with source == :raygun, expressed as
+        #                 normalised x positions so they can be drawn as
+        #                 vertical markers on the chart.
+        #
+        #   currency    - symbol string for axis labels (e.g. "£")
+        #
+        #   min_value / max_value - cent range used to size the Y axis.
+        #
+        # Event types that represent additive line-item deltas (build the check value up):
+        LINE_ITEM_EVENT_TYPES = %w[
+          check.line_item_added
+          check.discount_applied
+          check.service_charge_added
+        ].freeze
+
+        # Payment event types that settle the check (drive the balance toward zero):
+        PAYMENT_EVENT_TYPES = %w[
+          payment.initiated
+          payment.captured
+          payment.refunded
+          payment.failed
+        ].freeze
+
+        def chart_data_json
+          return {points: [], exceptions: [], currency: "£",
+                  min_value: 0, max_value: 0}.to_json if timeline.empty?
+
+          t_start = timeline.started_at
+          t_end   = timeline.ended_at
+          span    = (t_end - t_start).to_f
+          span    = 1.0 if span.zero?
+
+          # ── Value points ─────────────────────────────────────────────────
+          # The check value is built up by line items, discounts, and service
+          # charges — these are true deltas we can sum directly.
+          #
+          # Payments are NOT deltas against that running sum. The payment
+          # amount settles total_cents (net + tax + gratuity) whereas line
+          # items only contribute net_cents. Treating them as simple deltas
+          # produces a wrong result (e.g. £14.50 - £16.60 = -£2.10).
+          #
+          # Instead, when we see a payment event we drop the running balance
+          # by exactly the amount still outstanding at that moment — so the
+          # line always lands at zero (or remaining_cents) when fully paid.
+          # For refunds we add back the refunded amount.
+          # The authoritative peak value from the check record. Line items only
+          # sum to net_cents; total_cents also includes tax and gratuity. We use
+          # final_value_cents to bridge that gap before the payment lands so the
+          # graph peak and the payment drop are both correct.
+          authoritative_total = timeline.final_value_cents
+          currency_code       = timeline.currency
+
+          running        = 0
+          points         = []
+          peak_corrected = false   # only apply the correction once
+
+          timeline.events.each do |event|
+            next if event.amount.nil?
+
+            if LINE_ITEM_EVENT_TYPES.include?(event.event_type)
+              # Discounts are already stored as negative amounts by the parser.
+              running += event.amount
+              delta    = event.amount
+
+            elsif PAYMENT_EVENT_TYPES.include?(event.event_type)
+              # Before the first payment, snap the running total up to the
+              # authoritative total_cents if line items alone fell short
+              # (because tax / gratuity have no individual timestamped events).
+              # Emit the gap as an explicit synthetic point anchored 1 second
+              # before the payment so the step line visibly reaches the correct
+              # peak before dropping.
+              unless peak_corrected
+                if authoritative_total && running < authoritative_total
+                  gap   = authoritative_total - running
+                  x_gap = ((event.timestamp - t_start).to_f / span).clamp(0.0, 1.0)
+                  running = authoritative_total
+                  points << {
+                    event_id:          nil,
+                    x:                 x_gap.round(6),
+                    value:             running,
+                    value_formatted:   format_currency(running, currency_code),
+                    delta:             gap,
+                    delta_formatted:   format_currency(gap, currency_code),
+                    label:             "Tax & Gratuity",
+                    category:          "check",
+                    source:            "checks_api",
+                    currency_symbol:   CheckTimeline::Currency.symbol(currency_code),
+                    timestamp_label:   format_timestamp(event.timestamp)
+                  }
+                end
+                peak_corrected = true
+              end
+
+              if event.event_type == "payment.refunded"
+                # Refund: balance rises by the refunded amount
+                delta    = event.amount.abs
+                running += delta
+              else
+                # Payment (initiated/captured/failed): drop balance toward zero.
+                # Cap the drop at the current running balance so we never go
+                # below zero (handles partial payments correctly too).
+                drop     = [event.amount.abs, running].min
+                delta    = -drop
+                running += delta   # running = running - drop
+              end
+
+            else
+              next
+            end
+
+            x = ((event.timestamp - t_start).to_f / span).clamp(0.0, 1.0)
+
+            points << {
+              event_id:          event.id,
+              x:                 x.round(6),
+              value:             running,
+              value_formatted:   format_currency(running, event.currency),
+              delta:             delta,
+              delta_formatted:   format_currency(delta, event.currency),
+              label:             event.title,
+              category:          event.category.to_s,
+              source:            event.source.to_s,
+              currency_symbol:   CheckTimeline::Currency.symbol(event.currency),
+              timestamp_label:   format_timestamp(event.timestamp)
+            }
+          end
+
+          # ── Exception markers ────────────────────────────────────────────
+          exceptions = timeline.events
+            .select  { |e| e.source == :raygun }
+            .map do |e|
+              x = ((e.timestamp - t_start).to_f / span).clamp(0.0, 1.0)
+              {
+                event_id:        e.id,
+                x:               x.round(6),
+                label:           e.title,
+                severity:        e.severity.to_s,
+                timestamp_label: format_timestamp(e.timestamp)
+              }
+            end
+
+          # ── Y-axis range ─────────────────────────────────────────────────
+          # Include authoritative_total in the max calculation so the Y-axis
+          # peak reflects total_cents (net + tax + gratuity), not just the
+          # sum of individually-timestamped line items.
+          values    = points.map { |p| p[:value] }
+          min_value = values.min || 0
+          max_value = [values.max || 0, authoritative_total || 0].max
+
+          # Infer currency symbol from first amount-bearing event
+          sym = timeline.events.lazy
+                        .select { |e| e.amount && e.currency }
+                        .map    { |e| CheckTimeline::Currency.symbol(e.currency) }
+                        .first || "£"
+
+          {
+            points:    points,
+            exceptions: exceptions,
+            currency:  sym,
+            min_value: min_value,
+            max_value: max_value
+          }.to_json
+        end
+
         # ── Per-event amount formatting for the template ─────────────────────
 
         # Renders a formatted amount string for an event card.
