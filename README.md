@@ -48,7 +48,7 @@ A Ruby CLI tool that aggregates data from multiple sources — REST APIs and loc
 
 Given a check UUID, the tool fetches data from one or more sources:
 
-1. **Live API** — Calls `/public/checks/:id` and `/public/checks/:id/payments` for check, line item, discount, and payment events
+1. **Live API** — Calls `/checks/checks/:id?include=payments,paper_trail_versions` for check, line item, discount, payment, and PaperTrail version events — all in a single request
 2. **Local check file** — Reads a saved `check.json` in the same JSON:API format as the API response, optionally paired with a `payments.json` file. Useful offline or for investigating saved snapshots without API credentials. If the file's `included` array contains PaperTrail version records, they are parsed automatically — no extra flag needed
 3. **Raygun files** — Reads any number of local Raygun exception JSON files
 
@@ -89,45 +89,45 @@ Verify the install:
 
 The Checks API source is configured entirely through environment variables. **Credentials are never stored in code or config files.**
 
+The API base URL is fixed at `https://api.production.sohohousedigital.com` — no configuration is needed for it.
+
+The `X-On-Behalf-Of` user identifier is supplied at runtime via `--gid` (or `-g`) rather than an environment variable, since it typically varies per invocation. It is only required when fetching from the live API — not needed when using `--check-file`.
+
 | Variable | Required | Description |
 |---|---|---|
-| `CHECKS_API_BASE_URL` | ✅ | Base URL of the Checks API, e.g. `https://api.example.com` |
-| `CHECKS_API_KEY` | ✅ | Sent as the `X-API-Key` request header |
-| `CHECKS_APP_NAME` | ✅ | Sent as the `X-App-Name` request header |
+| `CHECKS_API_KEY` | ✅ | Sent as the `X-API-KEY` request header |
+
+| Option | Required | Description |
+|---|---|---|
+| `--gid USER` | ✅ (API only) | Sent as the `X-On-Behalf-Of` request header. Not needed with `--check-file`. |
 
 ### Setting environment variables
 
-Export them in your shell before running:
+Export the API key in your shell before running:
 
 ```sh
-export CHECKS_API_BASE_URL="https://api.example.com"
 export CHECKS_API_KEY="your-api-key"
-export CHECKS_APP_NAME="your-app-name"
 ```
 
-Or prefix them inline per invocation:
+Or prefix it inline per invocation:
 
 ```sh
-CHECKS_API_BASE_URL="https://api.example.com" \
 CHECKS_API_KEY="your-api-key" \
-CHECKS_APP_NAME="your-app-name" \
-./bin/check-timeline generate <UUID>
+./bin/check-timeline generate <UUID> --gid your@email.com
 ```
 
-Or store them in a `.env` file (never commit this file):
+Or store it in a `.env` file (never commit this file):
 
 ```sh
 # .env
-CHECKS_API_BASE_URL=https://api.example.com
 CHECKS_API_KEY=your-api-key
-CHECKS_APP_NAME=your-app-name
 ```
 
 Then load it before running:
 
 ```sh
 set -a && source .env && set +a
-./bin/check-timeline generate <UUID>
+./bin/check-timeline generate <UUID> --gid your@email.com
 ```
 
 > ⚠️ Add `.env` to your `.gitignore` to avoid accidentally committing credentials.
@@ -141,7 +141,7 @@ set -a && source .env && set +a
 Fetch live API data and render the timeline for a check UUID:
 
 ```sh
-./bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77
+./bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 --gid your@email.com
 ```
 
 This will:
@@ -153,7 +153,7 @@ This will:
 
 ### With a local check file
 
-Use a saved `check.json` instead of making a live API call. The file must be in the same JSON:API format returned by `GET /public/checks/:id`. No API credentials are needed.
+Use a saved `check.json` instead of making a live API call. The file must be in the same JSON:API format returned by `GET /checks/checks/:id`. No API credentials or `--gid` are needed.
 
 ```sh
 ./bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \
@@ -170,7 +170,7 @@ If you don't know the UUID up front, omit it — the tool reads `data.id` from t
 
 ### With a local check file and payments file
 
-Pair `--check-file` with `--payments-file` to also load payment events from a saved response. The payments file must be in the same format as `GET /public/checks/:id/payments` (a root array, `{ "data": [...] }`, or `{ "payments": [...] }`).
+Pair `--check-file` with `--payments-file` to also load payment events from a saved response. The payments file must be a root array, `{ "data": [...] }`, or `{ "payments": [...] }`.
 
 ```sh
 ./bin/check-timeline generate 8ac70c0e-8760-47b6-92f1-a8bf26e86a77 \
@@ -178,7 +178,7 @@ Pair `--check-file` with `--payments-file` to also load payment events from a sa
   --payments-file payments.json
 ```
 
-> **Note:** `--payments-file` is only used when `--check-file` is also given. When using the live API, payments are always fetched automatically from `/public/checks/:id/payments`.
+> **Note:** `--payments-file` is only used when `--check-file` is also given. When using the live API, payments and PaperTrail versions are returned automatically as sideloaded `included` records in the single API response.
 
 ### With Raygun exception files
 
@@ -282,6 +282,11 @@ OPTIONS
                               rendering. Enabled by default; use --no-open to
                               suppress.
 
+  -g, --gid USER              User identifier sent as the X-On-Behalf-Of
+                              header on every Checks API request. Required
+                              when fetching from the live API; not needed
+                              with --check-file.
+
   -P, --parallel              Fetch all sources concurrently using threads.
                               Most useful with multiple API sources.
 
@@ -301,11 +306,11 @@ OPTIONS
 
 | Scenario | Check data source | Payment data source | PaperTrail versions |
 |---|---|---|---|
-| API credentials set, no `--check-file` | Live API (`/public/checks/:id`) | Live API (`/public/checks/:id/payments`) | — |
-| `--check-file` given | Local file | `--payments-file` if given, otherwise none | Parsed automatically if present in `included` |
+| API credentials + `--gid` set, no `--check-file` | Live API (`/checks/checks/:id?include=payments,paper_trail_versions`) | Sideloaded in `included` | Sideloaded in `included` |
+| `--check-file` given | Local file | `--payments-file` if given, otherwise parsed from `included` | Parsed automatically if present in `included` |
 | Neither API credentials nor `--check-file` | ❌ Error — no source available | — | — |
 
-Raygun files are always additive — they can be combined with either of the above. PaperTrail versions require no separate flag; they are detected automatically from the check file.
+Raygun files are always additive — they can be combined with either of the above. PaperTrail versions require no separate flag; they are detected automatically from both the API response and local check files.
 
 ---
 
@@ -313,11 +318,11 @@ Raygun files are always additive — they can be combined with either of the abo
 
 **Class:** `CheckTimeline::Sources::ChecksApiSource`
 
-Makes two HTTP GET requests:
+Makes a single HTTP GET request:
 
-#### `GET /public/checks/:id`
+#### `GET /checks/checks/:id?include=payments,paper_trail_versions`
 
-Returns a [JSON:API](https://jsonapi.org/) document containing:
+Returns a [JSON:API](https://jsonapi.org/) document with payments and PaperTrail version records sideloaded in the `included` array:
 
 | Field | Description |
 |---|---|
@@ -333,7 +338,7 @@ Returns a [JSON:API](https://jsonapi.org/) document containing:
 | `data.attributes.created_at` | ISO 8601 timestamp |
 | `data.attributes.updated_at` | ISO 8601 timestamp |
 | `data.attributes.paid_at` | ISO 8601 timestamp or `null` |
-| `included` | Sideloaded venue and location records |
+| `included` | Sideloaded `payments` and `versions` records |
 
 The following events are produced from this endpoint:
 
@@ -345,28 +350,24 @@ The following events are produced from this endpoint:
 | `check.line_item_added` | One event per entry in `line_items` |
 | `check.discount_applied` | One event per entry in `discounts` |
 | `check.service_charge_added` | One event per entry in `service_charges` |
+| `payment.initiated` | `created_at` or `initiated_at` on a sideloaded payment |
+| `payment.captured` | `captured_at` or `succeeded_at` on a sideloaded payment |
+| `payment.failed` | `failed_at` on a sideloaded payment |
+| `payment.refunded` | `refunded_at` on a sideloaded payment |
+| `version.*` | One event per sideloaded PaperTrail version record |
 
 > **Note on line item timestamps:** The API does not return individual timestamps for line items. They are assigned a synthetic timestamp of `created_at + N seconds` (one second per item) so they appear after the check creation event but remain grouped correctly.
-
-#### `GET /public/checks/:id/payments`
-
-Returns either a JSON:API array or a wrapper object with a `data` or `payments` key. Both shapes are handled automatically.
-
-| Event Type | Trigger |
-|---|---|
-| `payment.initiated` | `created_at` or `initiated_at` is present |
-| `payment.captured` | `captured_at` or `succeeded_at` is present |
-| `payment.failed` | `failed_at` is present |
-| `payment.refunded` | `refunded_at` is present |
 
 **Authentication headers sent with every request:**
 
 | Header | Source |
 |---|---|
-| `X-API-Key` | `CHECKS_API_KEY` env var |
-| `X-App-Name` | `CHECKS_APP_NAME` env var |
+| `X-API-KEY` | `CHECKS_API_KEY` env var |
+| `X-On-Behalf-Of` | `--gid` CLI option |
 | `Accept` | `application/json` |
 | `User-Agent` | `check-timeline/1.0` |
+
+Requests are always sent to `https://api.production.sohohousedigital.com`.
 
 The HTTP client (Faraday) is configured with automatic retries: up to **3 attempts** with **0.5s base interval** and **exponential backoff**, for connection failures and timeouts only. Non-2xx responses are not retried.
 
@@ -950,13 +951,13 @@ Version events use `:info` by default, with `:warning` applied when a status tra
 ## Troubleshooting
 
 **`Source 'checks_api_source' is not available (skipping)`**
-One or more of `CHECKS_API_BASE_URL`, `CHECKS_API_KEY`, or `CHECKS_APP_NAME` is not set. Export all three before running.
+Either `CHECKS_API_KEY` is not set or `--gid` was not supplied. Both are required when fetching from the live API.
 
 **`checks_api_source received HTTP 401`**
-Your `CHECKS_API_KEY` or `CHECKS_APP_NAME` is incorrect. Verify both values.
+Your `CHECKS_API_KEY` is incorrect or the `--gid` value is not authorised. Verify both values.
 
 **`checks_api_source received HTTP 404`**
-The UUID does not exist in the API's environment. Confirm you are pointing at the right `CHECKS_API_BASE_URL` (production vs. staging) and that the UUID is correct.
+The UUID does not exist in the API. Confirm the UUID is correct and that you have access to the relevant environment.
 
 **`No sources are configured`**
 Neither API credentials nor `--check-file` were provided. You must supply at least one check data source.

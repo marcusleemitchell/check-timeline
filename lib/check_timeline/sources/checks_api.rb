@@ -6,12 +6,12 @@ require_relative "checks_parser"
 
 module CheckTimeline
   module Sources
-    # Fetches check and payment data from two REST endpoints:
+    # Fetches all check data from a single REST endpoint:
     #
-    #   GET /public/checks/:id
-    #   GET /public/checks/:id/payments
+    #   GET /checks/checks/:id?include=payments,paper_trail_versions
     #
-    # The check endpoint returns a JSON:API document:
+    # The endpoint returns a JSON:API document with payments and PaperTrail
+    # version records sideloaded in the "included" array:
     #   {
     #     "data": {
     #       "id": "...",
@@ -19,28 +19,33 @@ module CheckTimeline
     #       "attributes": { ... },
     #       "relationships": { ... }
     #     },
-    #     "included": [ ... ]
+    #     "included": [
+    #       { "type": "payments", ... },
+    #       { "type": "versions", ... }
+    #     ]
     #   }
     #
     # All monetary values in the API are already in cents (e.g. total_cents: 400).
     #
     # Required environment variables:
-    #   CHECKS_API_BASE_URL  - e.g. https://api.example.com
-    #   CHECKS_API_KEY       - sent as the X-API-Key header
-    #   CHECKS_APP_NAME      - sent as the X-App-Name header
+    #   CHECKS_API_KEY  - sent as the X-API-KEY request header
+    #
+    # Required runtime options:
+    #   gid:  - user identifier sent as the X-On-Behalf-Of request header
+    #           (only required when fetching from the live API)
     class ChecksApiSource < BaseSource
       include ChecksParser
 
-      ENV_BASE_URL = "CHECKS_API_BASE_URL"
-      ENV_API_KEY  = "CHECKS_API_KEY"
-      ENV_APP_NAME = "CHECKS_APP_NAME"
+      BASE_URL    = "https://api.production.sohohousedigital.com"
+      ENV_API_KEY = "CHECKS_API_KEY"
 
       def available?
-        [ENV_BASE_URL, ENV_API_KEY, ENV_APP_NAME].all? { |var| !ENV[var].to_s.strip.empty? }
+        !ENV[ENV_API_KEY].to_s.strip.empty? &&
+          !options[:gid].to_s.strip.empty?
       end
 
       def fetch
-        fetch_check_events + fetch_payment_events
+        fetch_all_events
       end
 
       def check_total_cents
@@ -50,12 +55,12 @@ module CheckTimeline
       private
 
       # -----------------------------------------------------------------------
-      # Check endpoint  GET /public/checks/:id
+      # Single endpoint  GET /checks/checks/:id?include=payments,paper_trail_versions
       # -----------------------------------------------------------------------
 
-      def fetch_check_events
-        endpoint = "/public/checks/#{check_id}"
-        response = connection.get(endpoint)
+      def fetch_all_events
+        endpoint = "/checks/checks/#{check_id}"
+        response = connection.get(endpoint, include: "payments,paper_trail_versions")
         handle_response!(response, endpoint: endpoint)
 
         doc = parse_json!(response.body, endpoint: endpoint)
@@ -64,20 +69,29 @@ module CheckTimeline
         # Timeline can display it directly rather than summing event amounts.
         @check_total_cents = parse_check_total_cents(doc)
 
-        parse_check_document(doc)
+        check_events   = parse_check_document(doc)
+        payment_events = parse_payments_from_doc(doc)
+        version_events = parse_versions_from_doc(doc)
+
+        check_events + payment_events + version_events
       end
 
-      # -----------------------------------------------------------------------
-      # Payments endpoint  GET /public/checks/:id/payments
-      # -----------------------------------------------------------------------
+      # Parse payment records sideloaded in the "included" array.
+      def parse_payments_from_doc(doc)
+        included = doc["included"] || []
+        payments = included.select { |r| r["type"] == "payments" }
+        return [] if payments.empty?
 
-      def fetch_payment_events
-        endpoint = "/public/checks/#{check_id}/payments"
-        response = connection.get(endpoint)
-        handle_response!(response, endpoint: endpoint)
+        parse_payments_document(payments)
+      end
 
-        doc = parse_json!(response.body, endpoint: endpoint)
-        parse_payments_document(doc)
+      # Parse PaperTrail version records sideloaded in the "included" array.
+      def parse_versions_from_doc(doc)
+        included = doc["included"] || []
+        return [] unless included.any? { |r| r["type"] == "versions" }
+
+        currency = doc.dig("data", "attributes", "currency") || "GBP"
+        parse_versions_document(doc, currency: currency)
       end
 
       # -----------------------------------------------------------------------
@@ -85,30 +99,26 @@ module CheckTimeline
       # -----------------------------------------------------------------------
 
       def connection
-        @connection ||= Faraday.new(url: base_url) do |f|
+        @connection ||= Faraday.new(url: BASE_URL) do |f|
           f.request  :retry, max: 3, interval: 0.5, backoff_factor: 2,
                              exceptions: [Faraday::TimeoutError, Faraday::ConnectionFailed]
           f.request  :json
           f.response :json, content_type: /\bjson$/
           f.adapter  Faraday.default_adapter
 
-          f.headers["X-API-Key"]  = api_key
-          f.headers["X-App-Name"] = app_name
-          f.headers["Accept"]     = "application/json"
+          f.headers["X-API-KEY"]      = api_key
+          f.headers["X-On-Behalf-Of"] = gid
+          f.headers["Accept"]          = "application/json"
           f.headers["User-Agent"] = "check-timeline/1.0"
         end
-      end
-
-      def base_url
-        @base_url ||= ENV.fetch(ENV_BASE_URL).chomp("/")
       end
 
       def api_key
         @api_key ||= ENV.fetch(ENV_API_KEY)
       end
 
-      def app_name
-        @app_name ||= ENV.fetch(ENV_APP_NAME)
+      def gid
+        @gid ||= options.fetch(:gid)
       end
 
       # -----------------------------------------------------------------------

@@ -54,8 +54,8 @@ module CheckTimeline
 
       # Parse a JSON:API payments document and return an array of Events.
       #
-      #   doc  - the parsed Hash/Array from GET /public/checks/:id/payments
-      #          (or a local payments JSON file)
+      #   doc  - the parsed Hash/Array of payment records (sideloaded from the
+      #          API's "included" array, or from a local payments JSON file)
       #
       def parse_payments_document(doc)
         payments = case doc
