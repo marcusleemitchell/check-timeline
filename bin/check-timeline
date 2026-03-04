@@ -18,8 +18,8 @@ module CheckTimeline
 
       Data is pulled from one or more sources and merged chronologically:
 
-        - The Checks API (GET /public/checks/:id and /public/checks/:id/payments)
-          requires CHECKS_API_BASE_URL, CHECKS_API_KEY, and CHECKS_APP_NAME to be set.
+        - The Checks API (GET /checks/checks/:id?include=payments,paper_trail_versions)
+            requires CHECKS_API_KEY to be set and --gid to be supplied.
 
         - A local check JSON file (--check-file) in the same JSON:API format
           returned by the live API. Useful offline or for saved snapshots.
@@ -108,6 +108,13 @@ module CheckTimeline
            desc:    "Fetch all sources concurrently using threads. " \
                     "Most useful when multiple API sources are configured."
 
+    option :gid,
+           type:    :string,
+           aliases: "-g",
+           banner:  "USER",
+           desc:    "User identifier sent as the X-On-Behalf-Of header on every Checks API " \
+                    "request. Required when fetching from the live API; not needed with --check-file."
+
     option :quiet,
            type:    :boolean,
            default: false,
@@ -147,7 +154,8 @@ module CheckTimeline
         timeline = CheckTimeline::Timeline.new(
           check_id:          check_id,
           events:            timeline.events,
-          check_total_cents: check_total_cents
+          check_total_cents: check_total_cents,
+          check_status:      timeline.check_status
         )
       end
 
@@ -230,12 +238,15 @@ module CheckTimeline
       # Only used when --check-file is NOT given. This avoids double-counting
       # check events when a file is provided alongside API credentials.
       elsif api_credentials_present?
-        source = Sources::ChecksApiSource.new(check_id: check_id)
-        log_source "checks_api", ENV["CHECKS_API_BASE_URL"]
+        source = Sources::ChecksApiSource.new(
+          check_id: check_id,
+          gid:      options[:gid]
+        )
+        log_source "checks_api", CheckTimeline::Sources::ChecksApiSource::BASE_URL
         sources << source
       else
-        warn_out "Checks API credentials not set (CHECKS_API_BASE_URL, CHECKS_API_KEY, " \
-                 "CHECKS_APP_NAME). Skipping live API source."
+        warn_out "Checks API credentials not set (CHECKS_API_KEY) or --gid not " \
+                 "supplied. Skipping live API source."
       end
 
       # ── Raygun exception files (--raygun, repeatable) ────────────────────
@@ -281,9 +292,8 @@ module CheckTimeline
     # -------------------------------------------------------------------------
 
     def api_credentials_present?
-      %w[CHECKS_API_BASE_URL CHECKS_API_KEY CHECKS_APP_NAME].all? do |var|
-        !ENV[var].to_s.strip.empty?
-      end
+      !ENV["CHECKS_API_KEY"].to_s.strip.empty? &&
+        !options[:gid].to_s.strip.empty?
     end
 
     # -------------------------------------------------------------------------
