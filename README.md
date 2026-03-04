@@ -32,6 +32,7 @@ A Ruby CLI tool that aggregates data from multiple sources — REST APIs and loc
     - [Timeline](#timeline)
   - [Renderers](#renderers)
   - [Aggregator](#aggregator)
+  - [Generator](#generator)
 - [HTML Output](#html-output)
 - [Adding a New Data Source](#adding-a-new-data-source)
 - [Event Types Reference](#event-types-reference)
@@ -365,7 +366,7 @@ The following events are produced from this endpoint:
 | `X-API-KEY` | `CHECKS_API_KEY` env var |
 | `X-On-Behalf-Of` | `--gid` CLI option |
 | `Accept` | `application/json` |
-| `User-Agent` | `check-timeline/1.0` |
+| `User-Agent` | `check-timeline/1.1.0` |
 
 Requests are always sent to `https://api.production.sohohousedigital.com`.
 
@@ -468,7 +469,7 @@ Identical to those from the live Checks API source:
 
 ### PaperTrail Versions
 
-**Class:** `CheckTimeline::Sources::CheckFileSource` (via `ChecksParser#parse_versions_document`)
+**Class:** `CheckTimeline::Sources::ChecksApiSource` and `CheckTimeline::Sources::CheckFileSource` (via `ChecksParser#parse_versions_document`)
 
 Reads PaperTrail audit records and converts each database mutation into a discrete timeline event. Version records are detected automatically from the `included` array of the check file wherever `type == "versions"` — no separate file or flag is required.
 
@@ -648,16 +649,18 @@ check-timeline/
 ├── bin/
 │   └── check-timeline              # CLI entry point (Thor-based)
 ├── lib/
+│   ├── check_timeline.rb           # Top-level loader / Zeitwerk setup + explicit requires
 │   └── check_timeline/
-│       ├── check_timeline.rb       # Top-level loader / Zeitwerk setup
 │       ├── aggregator.rb           # Orchestrates sources → Timeline
 │       ├── currency.rb             # Shared currency formatting module
 │       ├── event.rb                # Canonical Event value object (dry-struct)
+│       ├── generator.rb            # Embeddable programmatic entry point
 │       ├── timeline.rb             # Sorted, queryable collection of Events
+│       ├── version.rb              # VERSION constant
 │       ├── sources/
 │       │   ├── base_source.rb      # Abstract base all sources inherit from
 │       │   ├── checks_parser.rb    # Shared JSON:API + versions parsing mixin
-│       │   ├── checks_api.rb       # Live Checks + Payments API source
+│       │   ├── checks_api.rb       # Live Checks API source (HTTP)
 │       │   ├── check_file.rb       # Local check.json / payments.json source
 │       │   │                       # (versions auto-parsed from included array)
 │       │   └── raygun_file.rb      # Local Raygun exception JSON file source
@@ -665,8 +668,7 @@ check-timeline/
 │           └── html_renderer.rb    # Renders Timeline to self-contained HTML
 ├── templates/
 │   └── timeline.html.erb           # ERB template (CSS + JS inlined)
-├── config/
-│   └── sources.yml                 # Optional static configuration
+├── check_timeline.gemspec
 ├── Gemfile
 └── README.md
 ```
@@ -822,6 +824,36 @@ timeline = aggregator.run
 
 ---
 
+### Generator
+
+**File:** `lib/check_timeline/generator.rb`
+
+A programmatic entry point for embedding check-timeline inside other Ruby applications (e.g. an admin panel) without invoking the CLI. It talks directly to the source and renderer layers and returns a fully self-contained HTML string that the caller can serve or write however it likes.
+
+```ruby
+html = CheckTimeline::Generator.render(
+  check_id: "8ac70c0e-8760-47b6-92f1-a8bf26e86a77",
+  gid:      "user@example.com"
+)
+```
+
+The method always uses `ChecksApiSource` (live API). File-based sources are not supported via this interface — use the CLI for those.
+
+**Options:**
+
+| Option | Required | Description |
+|---|---|---|
+| `check_id:` | ✅ | UUID of the check to fetch |
+| `gid:` | ✅ | User identifier sent as `X-On-Behalf-Of` |
+| `api_key:` | ❌ | Overrides the `CHECKS_API_KEY` environment variable. Useful when the host app already holds the key in memory. |
+
+Raises `CheckTimeline::Generator::Error` if:
+- `check_id` or `gid` is blank
+- `CHECKS_API_KEY` is not set and no `api_key:` override is supplied
+- No events are returned for the check
+
+---
+
 ## HTML Output
 
 The rendered HTML file includes:
@@ -855,6 +887,8 @@ To add a new one:
 
 ```ruby
 # lib/check_timeline/sources/my_new_source.rb
+# frozen_string_literal: true
+
 module CheckTimeline
   module Sources
     class MyNewSource < BaseSource
@@ -917,18 +951,18 @@ end
 
 ## Event Types Reference
 
-| Event Type | Category | Source | Description |
+| Event Type | Category | Source(s) | Description |
 |---|---|---|---|
-| `check.created` | `:check` | `:checks_api` | Check was first opened |
-| `check.updated` | `:check` | `:checks_api` | Check attributes changed after creation |
-| `check.paid` | `:check` | `:checks_api` | Check was fully settled |
-| `check.line_item_added` | `:check` | `:checks_api` | A line item was added to the check |
-| `check.discount_applied` | `:check` | `:checks_api` | A discount was applied |
-| `check.service_charge_added` | `:check` | `:checks_api` | A service charge was added |
-| `payment.initiated` | `:payment` | `:checks_api` | Payment was created/initiated |
-| `payment.captured` | `:payment` | `:checks_api` | Payment was successfully captured |
-| `payment.failed` | `:payment` | `:checks_api` | Payment capture failed |
-| `payment.refunded` | `:payment` | `:checks_api` | A refund was processed |
+| `check.created` | `:check` | `:checks_api`, `:check_file_source` | Check was first opened |
+| `check.updated` | `:check` | `:checks_api`, `:check_file_source` | Check attributes changed after creation |
+| `check.paid` | `:check` | `:checks_api`, `:check_file_source` | Check was fully settled |
+| `check.line_item_added` | `:check` | `:checks_api`, `:check_file_source` | A line item was added to the check |
+| `check.discount_applied` | `:check` | `:checks_api`, `:check_file_source` | A discount was applied |
+| `check.service_charge_added` | `:check` | `:checks_api`, `:check_file_source` | A service charge was added |
+| `payment.initiated` | `:payment` | `:checks_api`, `:check_file_source` | Payment was created/initiated |
+| `payment.captured` | `:payment` | `:checks_api`, `:check_file_source` | Payment was successfully captured |
+| `payment.failed` | `:payment` | `:checks_api`, `:check_file_source` | Payment capture failed |
+| `payment.refunded` | `:payment` | `:checks_api`, `:check_file_source` | A refund was processed |
 | `version.create` | `:version` | `:paper_trail` | PaperTrail create record — check first persisted |
 | `version.update` | `:version` | `:paper_trail` | PaperTrail update record — one or more fields changed |
 | `exception.raised` | `:exception` | `:raygun` | An exception was recorded |
@@ -1110,15 +1144,16 @@ timeline.each { |e| puts "#{e.timestamp} #{e.severity.upcase.ljust(8)} #{e.title
 | `dry-struct` | Typed, immutable value objects for `Event` |
 | `dry-types` | Type system backing `dry-struct` |
 | `zeitwerk` | Auto-loading of the `lib/` directory |
-| `pastel` | Terminal colour output |
-| `tty-table` | Terminal table rendering |
 | `pry` | *(development)* Interactive REPL debugger |
+| `minitest` | *(development)* Test framework |
 
 ### Key source files for the file-based workflow
 
 | File | Role |
 |---|---|
+| `lib/check_timeline.rb` | Top-level loader — sets up Zeitwerk and explicitly requires all files in dependency order |
 | `lib/check_timeline/currency.rb` | Single authoritative currency formatting module — used everywhere |
+| `lib/check_timeline/generator.rb` | Programmatic entry point for embedding check-timeline in other Ruby apps via `CheckTimeline::Generator.render(check_id:, gid:)` |
 | `lib/check_timeline/sources/checks_parser.rb` | Pure parsing mixin — no I/O, no HTTP. Contains all JSON:API event builders (check, payment, version) shared by both API and file sources |
 | `lib/check_timeline/sources/checks_api.rb` | HTTP wrapper — fetches the document then delegates to `ChecksParser` |
 | `lib/check_timeline/sources/check_file.rb` | File wrapper — reads check and payments documents from disk, auto-parses any version records found in `included`, delegates all parsing to `ChecksParser` |
